@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: Commit or tag whose pom.xml version should be published
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.git_ref || github.ref }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      - name: Determine version and publish GitHub release
+        if: github.event_name == 'push'
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v5
+        with:
+          semantic_version: 24.2.9
+          extra_plugins: |
+            @semantic-release/exec@7.1.0
+            @semantic-release/git@10.0.1
+            conventional-changelog-conventionalcommits@8.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check required secrets
+        if: github.event_name == 'workflow_dispatch' || steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          missing=""
+          [ -n "$GPG_PRIVATE_KEY" ] || missing="$missing GPG_PRIVATE_KEY"
+          [ -n "$GPG_PASSPHRASE" ] || missing="$missing GPG_PASSPHRASE"
+          [ -n "$MAVEN_CENTRAL_USERNAME" ] || missing="$missing MAVEN_CENTRAL_USERNAME"
+          [ -n "$MAVEN_CENTRAL_PASSWORD" ] || missing="$missing MAVEN_CENTRAL_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing"
+            exit 1
+          fi
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+
+      - name: Set up Maven Central credentials
+        if: github.event_name == 'workflow_dispatch' || steps.semantic.outputs.new_release_published == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+          server-id: central
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Publish GPG public key
+        if: github.event_name == 'workflow_dispatch' || steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          set -euo pipefail
+          fpr=$(gpg --list-secret-keys --with-colons | awk -F: '$1=="fpr" { print $10; exit }')
+          if [ -z "$fpr" ]; then
+            echo "::error::No secret key was imported"
+            exit 1
+          fi
+          echo "Publishing public key $fpr"
+          gpg --batch --armor --export "$fpr" > public-key.asc
+          curl --fail-with-body --silent --show-error \
+            --data-urlencode "keytext@public-key.asc" \
+            https://keyserver.ubuntu.com/pks/add
+          curl --fail-with-body --silent --show-error -T public-key.asc https://keys.openpgp.org
+          curl --fail --silent "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$fpr" | grep -q "BEGIN PGP PUBLIC KEY BLOCK"
+          curl --fail --silent "https://keys.openpgp.org/vks/v1/by-fingerprint/$fpr" | grep -q "BEGIN PGP PUBLIC KEY BLOCK"
+
+      - name: Publish to Maven Central
+        if: github.event_name == 'workflow_dispatch' || steps.semantic.outputs.new_release_published == 'true'
+        run: mvn -B deploy -Prelease
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
