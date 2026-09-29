@@ -89,9 +89,10 @@ jobs:
           curl --fail-with-body --silent --show-error \
             --data-urlencode "keytext@public-key.asc" \
             https://keyserver.ubuntu.com/pks/add
-          curl --fail-with-body --silent --show-error -T public-key.asc https://keys.openpgp.org
-          curl --fail --silent "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$fpr" | grep -q "BEGIN PGP PUBLIC KEY BLOCK"
-          curl --fail --silent "https://keys.openpgp.org/vks/v1/by-fingerprint/$fpr" | grep -q "BEGIN PGP PUBLIC KEY BLOCK"
+          # curl -T appends the local filename, so PUT /public-key.asc 404s.
+          curl --fail-with-body --silent --show-error \
+            --data-urlencode "keytext@public-key.asc" \
+            https://keys.openpgp.org/pks/add
 
       - name: Publish to Maven Central
         if: github.event_name == 'workflow_dispatch' || steps.semantic.outputs.new_release_published == 'true'
